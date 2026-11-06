@@ -1,0 +1,6 @@
+# Python 3.13, Windows. Pysimverse simulator app must be running.
+# Used by garage_mission1.py, imagecapture_mission1.py, linefollower_mission3.py and Tire Scan project
+pysimverse==0.14
+opencv-python==5.0.0.93   # GUI build (not -headless): the scripts use cv2.imshow
+numpy==2.5.4
+pyzmq==27.2.0             # used internally by pysimverse
