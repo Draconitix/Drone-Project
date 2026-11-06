@@ -22,7 +22,7 @@ EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 # trackbar name -> (Params field, max value, scale)  value = trackbar / scale
 TRACKBARS = {
     "V max": ("v_max", 255, 1),
-    "S max": ("s_max", 255, 1),
+    "Chroma max": ("chroma_max", 255, 1),
     "Morph": ("morph_size", 15, 1),
     "Min area": ("min_area", 5000, 1),
     "Min aspect x100": ("min_aspect", 100, 100),
@@ -30,6 +30,8 @@ TRACKBARS = {
     "Min solid x100": ("min_solidity", 100, 100),
     "Min score x100": ("min_score", 150, 100),
     "Need hole": ("require_hole", 1, 1),
+    "Hole min x100": ("hole_min_frac", 100, 100),
+    "Hole offset x100": ("hole_max_offset", 100, 100),
 }
 
 
@@ -55,10 +57,11 @@ def read_params():
 
 def print_settings(p):
     print("\n# paste into config.py")
-    for attr, cfg in [("v_max", "V_MAX"), ("s_max", "S_MAX"), ("morph_size", "MORPH_SIZE"),
+    for attr, cfg in [("v_max", "V_MAX"), ("chroma_max", "CHROMA_MAX"), ("morph_size", "MORPH_SIZE"),
                       ("min_area", "MIN_AREA"), ("min_aspect", "MIN_ASPECT"),
                       ("min_circularity", "MIN_CIRCULARITY"), ("min_solidity", "MIN_SOLIDITY"),
-                      ("min_score", "MIN_SCORE"), ("require_hole", "REQUIRE_HOLE")]:
+                      ("min_score", "MIN_SCORE"), ("require_hole", "REQUIRE_HOLE"),
+                      ("hole_min_frac", "HOLE_MIN_FRAC"), ("hole_max_offset", "HOLE_MAX_OFFSET")]:
         print(f"{cfg} = {getattr(p, attr)}")
 
 

@@ -16,9 +16,10 @@ Flies the Pysimverse drone through a fixed sequence: take off, hover for 3 s, tu
 - `runs/<time>/frame_#####.jpg`: every raw frame from the flight, kept for tuning. Set `RECORD_FRAMES = False` in `config.py` to turn this off.
 
 ## How detection works (`detector.py`)
-- Tires are black rubber, so the detector first keeps only dark, low-saturation pixels (HSV).
+- Tires are black rubber, so the detector first keeps only dark pixels with little colour (`V_MAX`, `CHROMA_MAX`). Chroma (max − min of B, G, R) is used instead of HSV saturation. Saturation is unreliable on near-black pixels and was cutting the tire ring open.
+- A second pass finds tires that touch other dark objects (a shelf, the ladder) and merge into one odd-shaped blob. It looks for a round hole with a complete dark ring around it (`RING_*` settings).
 - It then keeps blobs that are large enough, roughly round or elliptical, and solid.
-- A blob with a hole in the middle (the rim) gets a higher score.
+- The blob must have a hole (the rim). The hole must be at least `HOLE_MIN_FRAC` of the blob's area and near its centre (`HOLE_MAX_OFFSET`). Dark objects without a hole are rejected, such as shadows, legs, ladders and bottles. So are dark frames whose opening is off to one side.
 - A screenshot is taken once a tire shows up in `CONFIRM_FRAMES` frames in a row.
 - No second screenshot is taken until the drone has turned at least `REARM_DEGREES` and the view has cleared, or until it has turned `REARM_FORCE_DEGREES`.
 
