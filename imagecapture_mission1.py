@@ -1,8 +1,11 @@
 from pysimverse import Drone
 import ctypes
 import os
+import threading
 import time
 import cv2
+import numpy as np
+import zmq
 
 # settings
 SPEED = 50          # max movement speed (left/right, forward/back, up/down)
@@ -10,17 +13,77 @@ YAW_SPEED = 0.5     # max rotation speed (yaw uses a small scale in pysimverse)
 ACCEL = 150         # how fast movement ramps up (units per second)
 DECEL = 200         # how fast movement ramps down (units per second)
 YAW_ACCEL = 1.5     # how fast rotation ramps up/down (units per second)
-LOOP_HZ = 30        # control loop rate
+LOOP_HZ = 30        # minimum control loop rate (the loop also wakes on every new frame)
 EPSILON = 1e-3      # values closer to 0 than this snap to exactly 0
 WINDOW_NAME = "Drone feed"
 PHOTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "photos")
 MESSAGE_TIME = 1.0  # seconds to show the "Photo saved" message
+FPS_REPORT_EVERY = 5.0  # seconds between fps prints (0 = off)
 VK_SPACE = 0x20
 
 # Win32 keyboard access (reads the real held/released state of every key)
 user32 = ctypes.windll.user32
 user32.GetForegroundWindow.restype = ctypes.c_void_p
 user32.FindWindowW.restype = ctypes.c_void_p
+
+
+class FrameReader:
+    """Receives and decodes video frames on a background thread.
+
+    This thread is the only user of drone.video_socket; the main thread only
+    uses the command socket, so no ZMQ socket is shared between threads.
+    """
+
+    def __init__(self, video_socket):
+        self.socket = video_socket
+        self.lock = threading.Lock()
+        self.new_frame = threading.Event()
+        self.stop_event = threading.Event()
+        self.frame = None
+        self.count = 0
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join(timeout=1.0)
+
+    def latest(self):
+        with self.lock:
+            return self.frame, self.count
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            try:
+                if not self.socket.poll(100):
+                    continue
+                data = self.socket.recv(zmq.NOBLOCK)
+            except zmq.Again:
+                continue
+            except zmq.ZMQError:
+                break  # socket closed
+            frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            with self.lock:
+                self.frame = frame
+                self.count += 1
+            self.new_frame.set()
+
+
+def send_rc(drone, lr, fb, ud, yaw):
+    """Same message as drone.send_rc_control, but without printing every call."""
+    drone.command_socket.send_json({
+        "left_right": lr,
+        "forward_backward": fb,
+        "up_down": ud,
+        "yaw": yaw,
+        "cameraangle": 0,
+        "streamon": None,
+        "color": {"red": None, "green": None, "blue": None},
+    })
 
 
 def feed_window_focused():
@@ -70,39 +133,65 @@ os.makedirs(PHOTO_DIR, exist_ok=True)
 
 # initialization
 drone = Drone()
+# keep only the newest frame in the socket (must be set before connect)
+drone.video_socket.setsockopt(zmq.CONFLATE, 1)
 drone.connect()
 time.sleep(0.4)
 drone.streamon()
+
+reader = FrameReader(drone.video_socket)
+reader.start()
+
 drone.take_off()
 
 lr = fb = ud = yaw = 0
 period = 1.0 / LOOP_HZ
 last_time = time.time()
 
-last_frame = None
+shown_count = 0
 photo_count = 0
 space_was_down = False
 message_until = 0.0
+overlay_shown = False
+fps_start = last_time
+fps_recv_start = reader.latest()[1]
+fps_shown = 0
 
 try:
     while True:
+        # wake as soon as a new frame arrives, or after `period` at the latest
+        reader.new_frame.wait(timeout=period)
+        reader.new_frame.clear()
+
         loop_start = time.time()
         dt = loop_start - last_time
         last_time = loop_start
 
-        frame, is_success = drone.get_frame()
-        if is_success:
-            last_frame = frame
+        last_frame, frame_count = reader.latest()
 
         # show the feed (overlay is drawn on a copy so saved photos stay clean)
         if last_frame is not None:
-            display = last_frame
-            if loop_start < message_until:
-                display = last_frame.copy()
-                cv2.putText(display, f"Photo saved ({photo_count})", (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow(WINDOW_NAME, display)
+            overlay_on = loop_start < message_until
+            if frame_count != shown_count or overlay_on != overlay_shown:
+                display = last_frame
+                if overlay_on:
+                    display = last_frame.copy()
+                    cv2.putText(display, f"Photo saved ({photo_count})", (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.imshow(WINDOW_NAME, display)
+                if frame_count != shown_count:
+                    fps_shown += 1
+                shown_count = frame_count
+                overlay_shown = overlay_on
         cv2.waitKey(1)  # needed so the window refreshes
+
+        if FPS_REPORT_EVERY and loop_start - fps_start >= FPS_REPORT_EVERY:
+            elapsed = loop_start - fps_start
+            print(f"camera {(frame_count - fps_recv_start) / elapsed:.1f} fps, "
+                  f"shown {fps_shown / elapsed:.1f} fps")
+            fps_start = loop_start
+            fps_recv_start = frame_count
+            fps_shown = 0
 
         # read keys (only while the feed window is focused)
         if feed_window_focused():
@@ -131,18 +220,14 @@ try:
         ud = approach(ud, target_ud, ACCEL, DECEL, dt)
         yaw = approach(yaw, target_yaw, YAW_ACCEL, YAW_ACCEL, dt)
 
-        drone.send_rc_control(lr, fb, ud, yaw)
-
-        # keep a steady loop rate
-        remaining = period - (time.time() - loop_start)
-        if remaining > 0:
-            time.sleep(remaining)
+        send_rc(drone, lr, fb, ud, yaw)
 
 except KeyboardInterrupt:
     pass
 
 finally:
-    drone.send_rc_control(0, 0, 0, 0)
+    send_rc(drone, 0, 0, 0, 0)
     drone.land()
     time.sleep(1)
+    reader.stop()
     drone.shutdown()
